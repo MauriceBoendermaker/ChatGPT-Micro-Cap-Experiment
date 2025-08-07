@@ -19,7 +19,7 @@ def load_portfolio_totals() -> pd.DataFrame:
     chatgpt_totals = chatgpt_df[chatgpt_df["Ticker"] == "TOTAL"].copy()
     chatgpt_totals["Date"] = pd.to_datetime(chatgpt_totals["Date"])
 
-    baseline_date = pd.Timestamp("2025-06-27")
+    baseline_date = pd.Timestamp("2025-08-06")
     baseline_equity = 100
     baseline_row = pd.DataFrame({"Date": [baseline_date], "Total Equity": [baseline_equity]})
     return pd.concat([baseline_row, chatgpt_totals], ignore_index=True).sort_values("Date")
@@ -31,7 +31,7 @@ def download_sp500(start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataF
     sp500 = sp500.reset_index()
     if isinstance(sp500.columns, pd.MultiIndex):
         sp500.columns = sp500.columns.get_level_values(0)
-    spx_27_price = 6173.07
+    spx_27_price = 6345.06  # S&P 500 close on August 6, 2025
     scaling_factor = 100 / spx_27_price
     sp500["SPX Value ($100 Invested)"] = sp500["Close"] * scaling_factor
     return sp500
@@ -41,7 +41,7 @@ def main() -> None:
     """Generate and display the comparison graph."""
     chatgpt_totals = load_portfolio_totals()
 
-    start_date = pd.Timestamp("2025-06-27")
+    start_date = pd.Timestamp("2025-08-06")
     end_date = chatgpt_totals["Date"].max()
     sp500 = download_sp500(start_date, end_date)
 
