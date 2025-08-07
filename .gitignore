@@ -643,3 +643,6 @@ yarn-error.log
 
 # Images folder
 images/
+
+
+.env
