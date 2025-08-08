@@ -14,6 +14,9 @@ from .storage import save_trade_log, append_total_row, load_latest_total_equity,
 from .portfolio import load_portfolio, summarize_portfolio_for_prompt
 from .universe_builder import auto_universe, build_universe
 from .risk_controls import breached_daily_drawdown, flatten_all, make_bracket_kwargs
+from .db import init_db, insert_trade, update_trade_pnl
+from .market_health import market_is_healthy
+from .thesis_change import thesis_changed
 
 
 def update_portfolio_totals(alpaca, portfolio_csv: str) -> None:
@@ -57,6 +60,7 @@ def execute_trade(alpaca, order: dict, limit_price: float, settings: dict, dry_r
 
 
 def main():
+    init_db()
     load_dotenv()
     settings = load_settings(os.path.join(os.path.dirname(__file__), "config", "settings.json"))
     alpaca = make_alpaca()
@@ -75,6 +79,19 @@ def main():
 
     acct = get_account(alpaca)
     equity_live = float(acct.equity)
+
+    if not thesis_changed(last_thesis, ai.thesis):
+        print("Thesis unchanged — skipping trades.")
+        update_portfolio_totals(alpaca, settings["portfolio_csv"])
+        new_equity = load_latest_total_equity(settings["portfolio_csv"])
+        if old_equity == 0:
+            print("Baseline set. Daily Change will be meaningful from next run.")
+        else:
+            print(f"Daily Change: ${new_equity - old_equity:.2f}")
+        plot_weekly_performance(settings["portfolio_csv"], settings["plot_dir"], interactive=bool(settings["plot_interactive"]))
+        return
+
+    healthy = market_is_healthy(alpaca)
 
     budget = settings.get("budget", {})
     virtual_equity = float(budget.get("virtual_equity", equity_live))
@@ -97,7 +114,8 @@ def main():
                 if owned > 0:
                     sell_candidates.append({"ticker": o.ticker, "price": price, "max_qty": owned, "reason": o.reason})
             continue
-        buy_candidates.append({"ticker": o.ticker, "price": price, "reason": o.reason})
+        if healthy:
+            buy_candidates.append({"ticker": o.ticker, "price": price, "reason": o.reason})
 
     buy_candidates = buy_candidates[:settings["risk"]["max_symbols"]]
     remaining = float(settings["budget"]["max_daily_allocation_abs"])
@@ -159,6 +177,7 @@ def main():
     for vo in validated_orders:
         client_id = make_client_order_id("chatgptbot", vo["ticker"])
         res = execute_trade(alpaca, vo, limit_price=vo["limit_price"], settings=settings, dry_run=bool(settings["dry_run"]), client_order_id=client_id)
+        insert_trade(vo["ticker"], vo["side"], int(vo["shares"]), float(vo["limit_price"]), res.get("status",""), int(res.get("qty",0)), float(res.get("filled_avg_price", vo["limit_price"])))
         log = {
             "Timestamp": iso_now_utc(),
             "Date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
