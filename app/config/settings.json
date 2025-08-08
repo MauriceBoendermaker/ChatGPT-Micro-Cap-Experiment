@@ -11,6 +11,11 @@
     "min_avg_volume": 200000,
     "max_market_cap": 300000000
   },
+  "budget": {
+    "virtual_equity": 1000,
+    "max_daily_allocation_abs": 1000,
+    "max_pos_abs": 1000
+  },
   "universe": {
     "exchanges": ["NYSE", "NASDAQ"]
   },
