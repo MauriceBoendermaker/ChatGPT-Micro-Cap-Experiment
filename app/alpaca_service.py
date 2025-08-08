@@ -26,9 +26,21 @@ def get_asset(alpaca: REST, symbol: str):
     return alpaca.get_asset(symbol)
 
 
+def get_latest_trade(alpaca: REST, symbol: str):
+    return alpaca.get_latest_trade(symbol)
+
+
+def get_latest_quote(alpaca: REST, symbol: str):
+    return alpaca.get_latest_quote(symbol)
+
+
 def get_last_trade_price(alpaca: REST, symbol: str) -> float:
     t = alpaca.get_latest_trade(symbol)
     return float(t.price)
+
+
+def get_bars(alpaca: REST, symbol: str, tf: TimeFrame, limit: int = 20):
+    return alpaca.get_bars(symbol, tf, limit=limit)
 
 
 def get_avg_volume(alpaca: REST, symbol: str, days: int = 20) -> float:
