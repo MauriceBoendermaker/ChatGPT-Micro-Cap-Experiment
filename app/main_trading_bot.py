@@ -1,7 +1,5 @@
 import os
-import json
 import time
-import pandas as pd
 
 from datetime import datetime, timezone
 from dotenv import load_dotenv
