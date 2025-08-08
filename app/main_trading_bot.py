@@ -95,72 +95,70 @@ def main():
     total_new_alloc_abs = 0.0
     validated_orders = []
 
-    rejections = []
+    buy_candidates = []
+    sell_candidates = []
+
     for o in ai.orders:
         meta = enrich_symbol(alpaca, o.ticker)
         if not validate_symbol(meta, settings):
-            rejections.append((o.ticker, "failed_symbol_validation", meta))
             continue
 
-        positions_value = {}
-        if not df.empty:
-            for _, r in df.iterrows():
-                positions_value[r["Ticker"]] = float(r["Total Value"])
-
         price = float(meta["price"])
-        available_cash_live = float(get_account(alpaca).cash)
-        remaining_budget_abs = max(0.0, max_daily_abs - total_new_alloc_abs)
-        available_cash_for_limits = min(available_cash_live, remaining_budget_abs)
 
-        qty_cash_clamped = clamp_qty_by_cash(o.shares, price, available_cash_for_limits)
-
-        if o.side == "buy":
-            qty_pct_limited = enforce_position_limits(o.ticker, qty_cash_clamped, price, equity_for_limits,
-                                                      positions_value, settings)
-        else:
+        if o.side == "sell":
             owned = 0
             if not df.empty and o.ticker in df["Ticker"].values:
                 owned = int(float(df[df["Ticker"] == o.ticker]["Shares"].iloc[0]))
-            qty_pct_limited = min(int(o.shares), owned)
+            if owned > 0:
+                sell_candidates.append({"ticker": o.ticker, "price": price, "max_qty": owned, "reason": o.reason})
+            continue
 
+        buy_candidates.append({"ticker": o.ticker, "price": price, "reason": o.reason})
+
+    # Apply symbol cap
+    buy_candidates = buy_candidates[:settings["risk"]["max_symbols"]]
+
+    # Equal-weight budget sizing
+    remaining = float(settings["budget"]["max_daily_allocation_abs"])
+    per_name = remaining / max(1, len(buy_candidates)) if buy_candidates else 0.0
+
+    validated_orders = []
+
+    # Buys
+    for c in buy_candidates:
+        price = c["price"]
         existing_value = 0.0
-        if not df.empty and o.ticker in df["Ticker"].values:
-            existing_value = float(df[df["Ticker"] == o.ticker]["Total Value"].iloc[0])
-        max_pos_abs_remaining = max(0.0, max_pos_abs - existing_value) if o.side == "buy" else float("inf")
+        if not df.empty and c["ticker"] in df["Ticker"].values:
+            existing_value = float(df[df["Ticker"] == c["ticker"]]["Total Value"].iloc[0])
 
-        qty_final = enforce_abs_caps(qty_pct_limited, price, remaining_budget_abs, max_pos_abs_remaining)
-        if qty_final <= 0:
-            rejections.append(
-                (o.ticker, "qty_final<=0", {"price": price, "remaining_budget_abs": remaining_budget_abs}))
+        max_pos_abs = float(settings["budget"]["max_pos_abs"])
+        pos_room_abs = max(0.0, max_pos_abs - existing_value)
+        alloc = min(per_name, pos_room_abs, remaining)
+        qty = int(alloc // price)
+        if qty <= 0:
             continue
 
-        value = qty_final * price
-        if o.side == "buy":
-            total_new_alloc_abs += value
-
-        symbols_after = set(symbols_before)
-        if o.side == "buy":
-            symbols_after.add(o.ticker)
-        if not within_max_symbols(symbols_after, settings):
-            rejections.append((o.ticker, "max_symbols"))
-            continue
-        if not max_daily_allocation_ok(total_new_alloc_abs, equity_for_limits,
-                                       {"risk": {"max_daily_allocation_pct": 1.0}}):
-            rejections.append((o.ticker, "max_daily_allocation"))
-            continue
-
-        limit = round(price * (1.01 if o.side == "buy" else 0.99), 2)
+        limit = round(price * 1.01, 2)
         validated_orders.append({
-            "ticker": o.ticker, "side": o.side, "shares": qty_final,
-            "reason": o.reason, "limit_price": limit
+            "ticker": c["ticker"], "side": "buy", "shares": qty, "reason": c["reason"], "limit_price": limit
         })
+        spent = qty * price
+        remaining -= spent
 
-    print("Validated orders:", validated_orders)
-    print("Rejected orders:", rejections)
+    # Sells
+    for c in sell_candidates:
+        if c["max_qty"] <= 0:
+            continue
+        limit = round(c["price"] * 0.99, 2)
+        validated_orders.append({
+            "ticker": c["ticker"], "side": "sell", "shares": int(c["max_qty"]), "reason": c["reason"],
+            "limit_price": limit
+        })
 
     clock = get_clock(alpaca)
     if not clock.is_open:
-        pass
+        print("Market closed; skipping order placement.")
+        validated_orders = []
 
     for vo in validated_orders:
         client_id = make_client_order_id("chatgptbot", vo["ticker"])
@@ -179,6 +177,8 @@ def main():
             "BudgetVirtualEquity": virtual_equity
         }
         save_trade_log(settings["trade_log_csv"], log)
+
+    print("Validated orders:", validated_orders)
 
     save_thesis(thesis_path, ai.thesis or "No thesis returned.")
     update_portfolio_totals(alpaca, settings["portfolio_csv"])
