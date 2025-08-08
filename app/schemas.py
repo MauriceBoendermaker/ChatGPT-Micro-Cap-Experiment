@@ -8,6 +8,7 @@ class Order(BaseModel):
     shares: float
     reason: Optional[str] = ""
 
+
     @validator("side")
     def v_side(cls, v):
         s = v.lower()
@@ -15,11 +16,12 @@ class Order(BaseModel):
             raise ValueError("side must be buy or sell")
         return s
 
+
     @validator("shares")
     def v_shares(cls, v):
         if v <= 0:
             raise ValueError("shares must be positive")
-        return vs
+        return v
 
 
 class AIResponse(BaseModel):
