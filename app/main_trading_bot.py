@@ -66,7 +66,6 @@ def execute_trade(alpaca, order: dict, dry_run: bool = False, client_order_id: s
 
 def main():
     load_dotenv()
-
     settings = load_settings(os.path.join(os.path.dirname(__file__), "config", "settings.json"))
     alpaca = make_alpaca()
 
@@ -78,8 +77,6 @@ def main():
 
     prompt = get_portfolio_prompt(port_json, cash_live, last_thesis, week=6)
     ai = ask_openai(prompt)
-
-    # Debug print
     print("AI orders raw:", [o.model_dump() for o in ai.orders])
 
     acct = get_account(alpaca)
@@ -92,8 +89,6 @@ def main():
     equity_for_limits = min(equity_live, virtual_equity)
 
     symbols_before = set(df["Ticker"].tolist()) if not df.empty else set()
-    total_new_alloc_abs = 0.0
-    validated_orders = []
 
     buy_candidates = []
     sell_candidates = []
@@ -102,9 +97,7 @@ def main():
         meta = enrich_symbol(alpaca, o.ticker)
         if not validate_symbol(meta, settings):
             continue
-
         price = float(meta["price"])
-
         if o.side == "sell":
             owned = 0
             if not df.empty and o.ticker in df["Ticker"].values:
@@ -112,48 +105,55 @@ def main():
             if owned > 0:
                 sell_candidates.append({"ticker": o.ticker, "price": price, "max_qty": owned, "reason": o.reason})
             continue
-
         buy_candidates.append({"ticker": o.ticker, "price": price, "reason": o.reason})
 
-    # Apply symbol cap
     buy_candidates = buy_candidates[:settings["risk"]["max_symbols"]]
 
-    # Equal-weight budget sizing
     remaining = float(settings["budget"]["max_daily_allocation_abs"])
     per_name = remaining / max(1, len(buy_candidates)) if buy_candidates else 0.0
 
     validated_orders = []
 
-    # Buys
     for c in buy_candidates:
         price = c["price"]
         existing_value = 0.0
         if not df.empty and c["ticker"] in df["Ticker"].values:
             existing_value = float(df[df["Ticker"] == c["ticker"]]["Total Value"].iloc[0])
-
-        max_pos_abs = float(settings["budget"]["max_pos_abs"])
-        pos_room_abs = max(0.0, max_pos_abs - existing_value)
+        pos_room_abs = max(0.0, float(max_pos_abs) - existing_value)
         alloc = min(per_name, pos_room_abs, remaining)
         qty = int(alloc // price)
         if qty <= 0:
             continue
-
         limit = round(price * 1.01, 2)
-        validated_orders.append({
-            "ticker": c["ticker"], "side": "buy", "shares": qty, "reason": c["reason"], "limit_price": limit
-        })
+        validated_orders.append({"ticker": c["ticker"], "side": "buy", "shares": qty, "reason": c["reason"], "limit_price": limit})
         spent = qty * price
         remaining -= spent
 
-    # Sells
     for c in sell_candidates:
         if c["max_qty"] <= 0:
             continue
         limit = round(c["price"] * 0.99, 2)
-        validated_orders.append({
-            "ticker": c["ticker"], "side": "sell", "shares": int(c["max_qty"]), "reason": c["reason"],
-            "limit_price": limit
-        })
+        validated_orders.append({"ticker": c["ticker"], "side": "sell", "shares": int(c["max_qty"]), "reason": c["reason"], "limit_price": limit})
+
+    cap = float(settings["budget"]["max_daily_allocation_abs"])
+    spent = 0.0
+    for i, o in enumerate(validated_orders):
+        if o["side"] != "buy":
+            continue
+        price = float(o.get("limit_price") or 0)
+        alloc = o["shares"] * price
+        if spent + alloc <= cap:
+            spent += alloc
+            continue
+        room = max(0.0, cap - spent)
+        max_qty = int(room // price) if price > 0 else 0
+        o["shares"] = max(max_qty, 0)
+        spent += o["shares"] * price
+    validated_orders = [o for o in validated_orders if o["side"] != "buy" or o["shares"] > 0]
+
+    planned_spend = sum(o["shares"] * (o.get("limit_price") or 0) for o in validated_orders if o["side"] == "buy")
+    print(f"Planned spend today: ${planned_spend:.2f} (cap ${settings['budget']['max_daily_allocation_abs']})")
+    print("Validated orders:", validated_orders)
 
     clock = get_clock(alpaca)
     if not clock.is_open:
@@ -163,7 +163,6 @@ def main():
     for vo in validated_orders:
         client_id = make_client_order_id("chatgptbot", vo["ticker"])
         res = execute_trade(alpaca, vo, dry_run=bool(settings["dry_run"]), client_order_id=client_id)
-
         log = {
             "Timestamp": iso_now_utc(),
             "Date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
@@ -178,13 +177,14 @@ def main():
         }
         save_trade_log(settings["trade_log_csv"], log)
 
-    print("Validated orders:", validated_orders)
-
     save_thesis(thesis_path, ai.thesis or "No thesis returned.")
     update_portfolio_totals(alpaca, settings["portfolio_csv"])
 
     new_equity = load_latest_total_equity(settings["portfolio_csv"])
-    print(f"Daily Change: ${new_equity - old_equity:.2f}")
+    if old_equity == 0:
+        print("Baseline set. Daily Change will be meaningful from next run.")
+    else:
+        print(f"Daily Change: ${new_equity - old_equity:.2f}")
 
     plot_weekly_performance(settings["portfolio_csv"], settings["plot_dir"], interactive=bool(settings["plot_interactive"]))
 
