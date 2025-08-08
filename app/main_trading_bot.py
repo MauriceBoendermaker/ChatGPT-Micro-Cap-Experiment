@@ -10,7 +10,7 @@ from .config_loader import load_settings
 from .thesis import load_thesis, save_thesis
 from .alpaca_service import make_alpaca, get_account, get_clock, list_positions, submit_order, get_order
 from .market_data import enrich_symbol
-from .risk_engine import clamp_qty_by_cash, validate_symbol, enforce_position_limits, within_max_symbols, max_daily_allocation_ok, make_client_order_id
+from .risk_engine import clamp_qty_by_cash, validate_symbol, enforce_position_limits, within_max_symbols, max_daily_allocation_ok, make_client_order_id, enforce_abs_caps
 from .openai_agent import get_portfolio_prompt, ask_openai
 from .plotting import plot_weekly_performance
 from .storage import save_trade_log, append_total_row, load_latest_total_equity, iso_now_utc
@@ -75,24 +75,33 @@ def main():
 
     settings = load_settings(os.path.join(os.path.dirname(__file__), "config", "settings.json"))
     alpaca = make_alpaca()
+
     old_equity = load_latest_total_equity(settings["portfolio_csv"])
-    df, cash = load_portfolio(alpaca)
+    df, cash_live = load_portfolio(alpaca)
     thesis_path = settings["thesis_file"]
     last_thesis = load_thesis(thesis_path)
     port_json = summarize_portfolio_for_prompt(df)
-    prompt = get_portfolio_prompt(port_json, cash, last_thesis, week=6)
+
+    prompt = get_portfolio_prompt(port_json, cash_live, last_thesis, week=6)
     ai = ask_openai(prompt)
+
     acct = get_account(alpaca)
-    equity = float(acct.equity)
+    equity_live = float(acct.equity)
+
+    budget = settings.get("budget", {})
+    virtual_equity = float(budget.get("virtual_equity", equity_live))
+    max_daily_abs = float(budget.get("max_daily_allocation_abs", float("inf")))
+    max_pos_abs = float(budget.get("max_pos_abs", float("inf")))
+    equity_for_limits = min(equity_live, virtual_equity)
+
     symbols_before = set(df["Ticker"].tolist()) if not df.empty else set()
-    total_new_alloc = 0.0
+    total_new_alloc_abs = 0.0
     validated_orders = []
 
     for o in ai.orders:
         meta = enrich_symbol(alpaca, o.ticker)
-        ok = validate_symbol(meta, settings)
 
-        if not ok:
+        if not validate_symbol(meta, settings):
             continue
 
         positions_value = {}
@@ -102,26 +111,38 @@ def main():
                 positions_value[r["Ticker"]] = float(r["Total Value"])
 
         price = float(meta["price"])
-        available_cash = float(get_account(alpaca).cash)
-        qty_cash_clamped = clamp_qty_by_cash(o.shares, price, available_cash)
+        available_cash_live = float(get_account(alpaca).cash)
+        remaining_budget_abs = max(0.0, max_daily_abs - total_new_alloc_abs)
+        available_cash_for_limits = min(available_cash_live, remaining_budget_abs)
+
+        qty_cash_clamped = clamp_qty_by_cash(o.shares, price, available_cash_for_limits)
 
         if o.side == "buy":
-            qty_limited = enforce_position_limits(o.ticker, qty_cash_clamped, price, equity, positions_value, settings)
+            qty_pct_limited = enforce_position_limits(o.ticker, qty_cash_clamped, price, equity_for_limits, positions_value, settings)
         else:
             owned = 0
 
             if not df.empty and o.ticker in df["Ticker"].values:
                 owned = int(float(df[df["Ticker"] == o.ticker]["Shares"].iloc[0]))
 
-            qty_limited = min(int(o.shares), owned)
+            qty_pct_limited = min(int(o.shares), owned)
 
-        if qty_limited <= 0:
+        existing_value = 0.0
+
+        if not df.empty and o.ticker in df["Ticker"].values:
+            existing_value = float(df[df["Ticker"] == o.ticker]["Total Value"].iloc[0])
+
+        max_pos_abs_remaining = max(0.0, max_pos_abs - existing_value) if o.side == "buy" else float("inf")
+
+        qty_final = enforce_abs_caps(qty_pct_limited, price, remaining_budget_abs, max_pos_abs_remaining)
+
+        if qty_final <= 0:
             continue
 
-        value = qty_limited * price
+        value = qty_final * price
 
         if o.side == "buy":
-            total_new_alloc += value
+            total_new_alloc_abs += value
 
         symbols_after = set(symbols_before)
 
@@ -131,13 +152,12 @@ def main():
         if not within_max_symbols(symbols_after, settings):
             continue
 
-        if not max_daily_allocation_ok(total_new_alloc, equity, settings):
+        if not max_daily_allocation_ok(total_new_alloc_abs, equity_for_limits, {"risk": {"max_daily_allocation_pct": 1.0}}):
             continue
 
-        validated_orders.append({"ticker": o.ticker, "side": o.side, "shares": qty_limited, "reason": o.reason})
+        validated_orders.append({"ticker": o.ticker, "side": o.side, "shares": qty_final, "reason": o.reason})
 
     clock = get_clock(alpaca)
-
     if not clock.is_open:
         pass
 
@@ -154,7 +174,8 @@ def main():
             "Reason": vo.get("reason", ""),
             "OrderStatus": res.get("status", ""),
             "OrderId": res.get("order_id", ""),
-            "ClientOrderId": client_id
+            "ClientOrderId": client_id,
+            "BudgetVirtualEquity": virtual_equity
         }
         save_trade_log(settings["trade_log_csv"], log)
 
