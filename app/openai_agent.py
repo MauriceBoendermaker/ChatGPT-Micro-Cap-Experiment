@@ -7,14 +7,14 @@ from .schemas import AIResponse
 
 def get_portfolio_prompt(portfolio_summary_json: str, cash: float, previous_thesis: str, week: int) -> str:
     return (
-        f"You are a professional-grade portfolio strategist. You have a portfolio (Week {week}). "
+        f"You are a professional-grade portfolio strategist. Week {week}. "
         f"Holdings: {portfolio_summary_json} "
         f"Cash: {cash:.2f} "
         f"Previous thesis: {previous_thesis} "
-        f"Only use U.S.-listed micro-cap stocks with market cap under $300M, price >= $1, and sufficient liquidity. "
-        f"Return a JSON object with lowercase keys: "
-        f'{{"orders":[{{"ticker":"XYZ","side":"buy","shares":10,"reason":"r"}}], "thesis":"t"}} '
-        f"Do not include commentary."
+        f"Constraints: U.S.-listed micro-caps under $300M, price >= $1, avg volume >= 100k, exchanges NYSE or NASDAQ. "
+        f"Propose up to 3 tickers and size shares so total spend is <= $1000 today. "
+        f"Return JSON only: "
+        f'{{"orders":[{{"ticker":"XYZ","side":"buy","shares":10,"reason":"r"}}], "thesis":"t"}}'
     )
 
 
