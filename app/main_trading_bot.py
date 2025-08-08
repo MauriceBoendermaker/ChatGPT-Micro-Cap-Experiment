@@ -41,31 +41,27 @@ def update_portfolio_totals(alpaca, portfolio_csv: str) -> None:
 def execute_trade(alpaca, order: dict, dry_run: bool = False, client_order_id: str = "") -> dict:
     side = order["side"]
     symbol = order["ticker"]
-    qty = order["shares"]
+    qty = int(order["shares"])
     reason = order.get("reason", "AUTO TRADE")
-
+    limit_price = float(order.get("limit_price", 0))
     if dry_run:
-        return {"status": "dry_run", "symbol": symbol, "side": side, "qty": qty, "reason": reason}
-
+        return {"status": "dry_run", "symbol": symbol, "side": side, "qty": qty, "reason": reason, "limit_price": limit_price}
     o = submit_order(
         alpaca,
         symbol=symbol,
         qty=qty,
         side=side,
-        type="limit" if side in {"buy","sell"} else "market",
+        type="limit",
+        limit_price=limit_price,
         time_in_force="day",
         client_order_id=client_order_id
     )
-
     oid = o.id
-
     for _ in range(30):
         time.sleep(1)
         s = get_order(alpaca, oid)
-
         if s.status in {"filled","canceled","rejected","partially_filled","expired"}:
             return {"status": s.status, "symbol": symbol, "side": side, "qty": float(s.filled_qty or 0), "order_id": oid, "reason": reason}
-
     s = get_order(alpaca, oid)
     return {"status": s.status, "symbol": symbol, "side": side, "qty": float(s.filled_qty or 0), "order_id": oid, "reason": reason}
 
@@ -85,6 +81,9 @@ def main():
     prompt = get_portfolio_prompt(port_json, cash_live, last_thesis, week=6)
     ai = ask_openai(prompt)
 
+    # Debug print
+    print("AI orders raw:", [o.model_dump() for o in ai.orders])
+
     acct = get_account(alpaca)
     equity_live = float(acct.equity)
 
@@ -98,14 +97,14 @@ def main():
     total_new_alloc_abs = 0.0
     validated_orders = []
 
+    rejections = []
     for o in ai.orders:
         meta = enrich_symbol(alpaca, o.ticker)
-
         if not validate_symbol(meta, settings):
+            rejections.append((o.ticker, "failed_symbol_validation", meta))
             continue
 
         positions_value = {}
-
         if not df.empty:
             for _, r in df.iterrows():
                 positions_value[r["Ticker"]] = float(r["Total Value"])
@@ -118,44 +117,48 @@ def main():
         qty_cash_clamped = clamp_qty_by_cash(o.shares, price, available_cash_for_limits)
 
         if o.side == "buy":
-            qty_pct_limited = enforce_position_limits(o.ticker, qty_cash_clamped, price, equity_for_limits, positions_value, settings)
+            qty_pct_limited = enforce_position_limits(o.ticker, qty_cash_clamped, price, equity_for_limits,
+                                                      positions_value, settings)
         else:
             owned = 0
-
             if not df.empty and o.ticker in df["Ticker"].values:
                 owned = int(float(df[df["Ticker"] == o.ticker]["Shares"].iloc[0]))
-
             qty_pct_limited = min(int(o.shares), owned)
 
         existing_value = 0.0
-
         if not df.empty and o.ticker in df["Ticker"].values:
             existing_value = float(df[df["Ticker"] == o.ticker]["Total Value"].iloc[0])
-
         max_pos_abs_remaining = max(0.0, max_pos_abs - existing_value) if o.side == "buy" else float("inf")
 
         qty_final = enforce_abs_caps(qty_pct_limited, price, remaining_budget_abs, max_pos_abs_remaining)
-
         if qty_final <= 0:
+            rejections.append(
+                (o.ticker, "qty_final<=0", {"price": price, "remaining_budget_abs": remaining_budget_abs}))
             continue
 
         value = qty_final * price
-
         if o.side == "buy":
             total_new_alloc_abs += value
 
         symbols_after = set(symbols_before)
-
         if o.side == "buy":
             symbols_after.add(o.ticker)
-
         if not within_max_symbols(symbols_after, settings):
+            rejections.append((o.ticker, "max_symbols"))
+            continue
+        if not max_daily_allocation_ok(total_new_alloc_abs, equity_for_limits,
+                                       {"risk": {"max_daily_allocation_pct": 1.0}}):
+            rejections.append((o.ticker, "max_daily_allocation"))
             continue
 
-        if not max_daily_allocation_ok(total_new_alloc_abs, equity_for_limits, {"risk": {"max_daily_allocation_pct": 1.0}}):
-            continue
+        limit = round(price * (1.01 if o.side == "buy" else 0.99), 2)
+        validated_orders.append({
+            "ticker": o.ticker, "side": o.side, "shares": qty_final,
+            "reason": o.reason, "limit_price": limit
+        })
 
-        validated_orders.append({"ticker": o.ticker, "side": o.side, "shares": qty_final, "reason": o.reason})
+    print("Validated orders:", validated_orders)
+    print("Rejected orders:", rejections)
 
     clock = get_clock(alpaca)
     if not clock.is_open:
