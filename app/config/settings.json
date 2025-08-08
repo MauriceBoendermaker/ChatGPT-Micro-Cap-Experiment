@@ -1,0 +1,22 @@
+{
+  "mode": "paper",
+  "dry_run": false,
+  "plot_interactive": false,
+  "timezone": "Europe/Amsterdam",
+  "risk": {
+    "max_pos_pct": 0.2,
+    "max_daily_allocation_pct": 0.5,
+    "max_symbols": 10,
+    "min_price": 1.0,
+    "min_avg_volume": 200000,
+    "max_market_cap": 300000000
+  },
+  "universe": {
+    "exchanges": ["NYSE", "NASDAQ"]
+  },
+  "plot_dir": "plots",
+  "data_dir": "Scripts and CSV Files",
+  "portfolio_csv": "Scripts and CSV Files/chatgpt_portfolio_update.csv",
+  "trade_log_csv": "Scripts and CSV Files/chatgpt_trades.csv",
+  "thesis_file": "Scripts and CSV Files/thesis.txt"
+}
