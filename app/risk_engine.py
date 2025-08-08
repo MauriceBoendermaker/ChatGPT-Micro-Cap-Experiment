@@ -38,3 +38,11 @@ def max_daily_allocation_ok(new_allocation_value: float, account_equity: float, 
 
 def make_client_order_id(prefix: str, symbol: str) -> str:
     return f"{prefix}_{symbol}_{uuid.uuid4().hex[:8]}"
+
+
+def enforce_abs_caps(qty: int, price: float, remaining_budget_abs: float, max_pos_abs_remaining: float) -> int:
+    if price <= 0:
+        return 0
+    by_budget = int(remaining_budget_abs // price) if remaining_budget_abs is not None else qty
+    by_pos_abs = int(max_pos_abs_remaining // price) if max_pos_abs_remaining is not None else qty
+    return max(min(qty, by_budget, by_pos_abs), 0)
