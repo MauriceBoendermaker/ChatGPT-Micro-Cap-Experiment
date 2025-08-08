@@ -4,7 +4,6 @@ import json
 from openai import OpenAI
 from .schemas import AIResponse
 
-
 def get_portfolio_prompt(portfolio_summary_json: str, cash: float, previous_thesis: str, week: int) -> str:
     return (
         f"You are a professional-grade portfolio strategist. Week {week}. "
@@ -17,13 +16,12 @@ def get_portfolio_prompt(portfolio_summary_json: str, cash: float, previous_thes
         f'{{"orders":[{{"ticker":"XYZ","side":"buy","shares":10,"reason":"r"}}], "thesis":"t"}}'
     )
 
-
 def ask_openai(prompt: str) -> AIResponse:
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     r = client.chat.completions.create(
         model="gpt-4o",
         response_format={"type": "json_object"},
-        temperature=0.3,
+        temperature=0.2,
         messages=[{"role": "user", "content": prompt}],
     )
     content = r.choices[0].message.content
