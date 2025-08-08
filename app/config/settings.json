@@ -1,6 +1,6 @@
 {
   "mode": "paper",
-  "dry_run": true,
+  "dry_run": false,
   "plot_interactive": false,
   "timezone": "Europe/Amsterdam",
   "risk": {
