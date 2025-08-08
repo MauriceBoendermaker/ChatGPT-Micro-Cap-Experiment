@@ -3,8 +3,15 @@ import json
 import tempfile
 import pandas as pd
 
-from datetime import datetime, timezone
 from typing import Dict, Any
+from datetime import datetime, timezone
+
+
+COLUMNS = ["Timestamp","Date","Ticker","Shares","Cost Basis","Stop Loss","Current Price","Total Value","PnL","Action","Cash Balance","Total Equity"]
+
+
+def iso_now_utc() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _atomic_write_csv(df: pd.DataFrame, path: str) -> None:
@@ -16,16 +23,16 @@ def _atomic_write_csv(df: pd.DataFrame, path: str) -> None:
 
 
 def save_trade_log(path: str, log: Dict[str, Any]) -> None:
-    if os.path.exists(path):
+    if os.path.exists(path) and os.path.getsize(path) > 0:
         df = pd.read_csv(path)
-        df = pd.concat([df, pd.DataFrame([log])], ignore_index=True)
     else:
-        df = pd.DataFrame([log])
+        df = pd.DataFrame()
+    df = pd.concat([df, pd.DataFrame([log])], ignore_index=True)
     _atomic_write_csv(df, path)
 
 
 def load_latest_total_equity(path: str) -> float:
-    if not os.path.exists(path):
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
         return 0.0
     df = pd.read_csv(path)
     if "Ticker" not in df.columns or df.empty:
@@ -37,13 +44,14 @@ def load_latest_total_equity(path: str) -> float:
 
 
 def append_total_row(path: str, row: Dict[str, Any]) -> None:
-    if os.path.exists(path):
+    if os.path.exists(path) and os.path.getsize(path) > 0:
         df = pd.read_csv(path)
-        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        missing = [c for c in COLUMNS if c not in df.columns]
+        for c in missing:
+            df[c] = ""
+        df = df[COLUMNS]
+        df.loc[len(df)] = [row.get(c, "") for c in COLUMNS]
     else:
-        df = pd.DataFrame([row])
+        df = pd.DataFrame(columns=COLUMNS)
+        df.loc[0] = [row.get(c, "") for c in COLUMNS]
     _atomic_write_csv(df, path)
-
-
-def iso_now_utc() -> str:
-    return datetime.now(timezone.utc).isoformat()
