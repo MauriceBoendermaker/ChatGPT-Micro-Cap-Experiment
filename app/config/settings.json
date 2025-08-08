@@ -8,7 +8,7 @@
     "max_daily_allocation_pct": 1.0,
     "max_symbols": 3,
     "min_price": 1.0,
-    "min_avg_volume": 150000,
+    "min_avg_volume": 100000,
     "max_market_cap": 300000000
   },
   "budget": {
@@ -17,7 +17,21 @@
     "max_pos_abs": 1000
   },
   "universe": {
-    "exchanges": ["NYSE", "NASDAQ"]
+    "exchanges": ["NYSE", "NASDAQ"],
+    "max_size": 200,
+    "min_price": 1.0,
+    "max_price": 20.0,
+    "min_avg_volume": 100000
+  },
+  "drawdown": {
+    "max_daily_loss_pct": 0.02,
+    "flatten_on_breach": true
+  },
+  "brackets": {
+    "use_bracket": true,
+    "stop_loss_pct": 0.05,
+    "take_profit_pct": 0.08,
+    "trailing_stop_pct": 0.0
   },
   "plot_dir": "plots",
   "data_dir": "Scripts and CSV Files",
