@@ -1,22 +1,13 @@
-import math
+import time
 
-from typing import List, Dict
-from .alpaca_service import get_asset, get_last_trade_price, get_avg_volume
+from typing import List
+from alpaca_trade_api.rest import TimeFrame
+from .alpaca_service import get_bars_multi
 
 
-def build_universe(alpaca, symbols: List[str]) -> List[Dict]:
-    universe = []
-    for sym in symbols:
-        try:
-            a = get_asset(alpaca, sym)
-            price = get_last_trade_price(alpaca, sym)
-            vol = get_avg_volume(alpaca, sym, days=20)
-            exchange = getattr(a, "exchange", None)
-            tradable = bool(getattr(a, "tradable", False))
-            universe.append({"symbol": sym, "price": float(price), "avg_volume": float(vol), "exchange": exchange, "tradable": tradable})
-        except Exception:
-            continue
-    return universe
+def _chunks(seq, n):
+    for i in range(0, len(seq), n):
+        yield seq[i:i+n]
 
 
 def auto_universe(alpaca, settings: dict) -> List[str]:
@@ -25,24 +16,42 @@ def auto_universe(alpaca, settings: dict) -> List[str]:
     max_price = float(settings["universe"]["max_price"])
     min_avg_volume = float(settings["universe"]["min_avg_volume"])
     max_size = int(settings["universe"]["max_size"])
-    assets = alpaca.list_assets(status="active", asset_class="us_equity")
-    candidates = []
+    scan_cap = int(settings["universe"].get("max_scan", 1200))
+    days = int(settings["universe"].get("avg_volume_days", 20))
+    chunk_size = int(settings["universe"].get("batch_size", 200))
+    timeout_seconds = int(settings["universe"].get("timeout_seconds", 20))
 
-    for a in assets:
-        if a.exchange not in exchanges:
-            continue
-        if not a.tradable:
-            continue
-        try:
-            price = get_last_trade_price(alpaca, a.symbol)
-            if price < min_price or price > max_price:
+    assets = alpaca.list_assets(status="active", asset_class="us_equity")
+    syms = [a.symbol for a in assets if a.exchange in exchanges and a.tradable][:scan_cap]
+    start_t = time.monotonic()
+
+    scored = []
+    for batch in _chunks(syms, chunk_size):
+        if time.monotonic() - start_t > timeout_seconds:
+            break
+        bars = get_bars_multi(alpaca, batch, TimeFrame.Day, limit=days)
+        by_sym = {}
+        for b in bars:
+            by_sym.setdefault(b.S, []).append(b)
+
+        for s in batch:
+            sb = by_sym.get(s, [])
+            if not sb:
                 continue
-            avgv = get_avg_volume(alpaca, a.symbol, days=20)
+            closes = [float(x.c) for x in sb if float(x.c) > 0]
+            vols = [float(x.v) for x in sb if float(x.v) > 0]
+            if not closes or not vols:
+                continue
+            last_px = closes[-1]
+            avgv = sum(vols)/len(vols)
+            if last_px < min_price or last_px > max_price:
+                continue
             if avgv < min_avg_volume:
                 continue
-            candidates.append((a.symbol, avgv))
-        except Exception:
-            continue
+            scored.append((s, avgv))
 
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    return [c[0] for c in candidates[:max_size]]
+        if len(scored) >= max_size*2:
+            break
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [s for s,_ in scored[:max_size]]
