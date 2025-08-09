@@ -1,6 +1,6 @@
 {
   "mode": "paper",
-  "dry_run": false,
+  "dry_run": true,
   "plot_interactive": false,
   "timezone": "Europe/Amsterdam",
   "risk": {
@@ -21,7 +21,11 @@
     "max_size": 200,
     "min_price": 1.0,
     "max_price": 20.0,
-    "min_avg_volume": 100000
+    "min_avg_volume": 100000,
+    "max_scan": 1200,
+    "avg_volume_days": 20,
+    "batch_size": 200,
+    "timeout_seconds": 20
   },
   "drawdown": {
     "max_daily_loss_pct": 0.02,
@@ -33,9 +37,28 @@
     "take_profit_pct": 0.08,
     "trailing_stop_pct": 0.0
   },
+  "vote": {
+    "enabled": true,
+    "models": ["gpt-4o", "gpt-4o-mini", "gpt-4o"],
+    "min_votes": 2
+  },
+  "reporting": {
+    "enabled": true,
+    "channel": "email"
+  },
+  "rebalance": {
+    "enabled": true,
+    "reference": "portfolio_equity",
+    "up_pct": 0.10,
+    "down_pct": 0.10,
+    "min_virtual": 250,
+    "max_virtual": 5000,
+    "round_to": 50
+  },
   "plot_dir": "plots",
   "data_dir": "Scripts and CSV Files",
   "portfolio_csv": "Scripts and CSV Files/chatgpt_portfolio_update.csv",
   "trade_log_csv": "Scripts and CSV Files/chatgpt_trades.csv",
-  "thesis_file": "Scripts and CSV Files/thesis.txt"
+  "thesis_file": "Scripts and CSV Files/thesis.txt",
+  "state_file": "Scripts and CSV Files/state.json"
 }
