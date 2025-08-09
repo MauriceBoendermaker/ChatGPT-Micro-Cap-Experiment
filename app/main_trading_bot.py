@@ -1,7 +1,11 @@
 import os
 import time
-from datetime import datetime, timezone
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
+from datetime import datetime, timezone
 
 from .config_loader import load_settings
 from .thesis import load_thesis, save_thesis
@@ -12,11 +16,16 @@ from .openai_agent import get_portfolio_prompt, ask_openai
 from .plotting import plot_weekly_performance
 from .storage import save_trade_log, append_total_row, load_latest_total_equity, iso_now_utc
 from .portfolio import load_portfolio, summarize_portfolio_for_prompt
-from .universe_builder import auto_universe, build_universe
+from .universe_builder import auto_universe
 from .risk_controls import breached_daily_drawdown, flatten_all, make_bracket_kwargs
-from .db import init_db, insert_trade, update_trade_pnl
+from .db import init_db, insert_trade
 from .market_health import market_is_healthy
 from .thesis_change import thesis_changed
+from .multi_model_voter import vote_orders
+from .budget_rebalancer import rebalance, save_virtual_equity
+from .state import load_state, save_state
+from .market_forecast import next_day_forecast
+from .reporter import build_report_html, send_email_html
 
 
 def update_portfolio_totals(alpaca, portfolio_csv: str) -> None:
@@ -53,16 +62,130 @@ def execute_trade(alpaca, order: dict, limit_price: float, settings: dict, dry_r
     for _ in range(30):
         time.sleep(1)
         s = get_order(alpaca, oid)
-        if s.status in {"filled","canceled","rejected","partially_filled","expired"}:
-            return {"status": s.status, "symbol": symbol, "side": side, "qty": float(s.filled_qty or 0), "order_id": oid, "reason": reason, "filled_avg_price": float(getattr(s, "filled_avg_price", 0) or 0)}
+        if s.status in {"filled", "canceled", "rejected", "partially_filled", "expired"}:
+            return {
+                "status": s.status,
+                "symbol": symbol,
+                "side": side,
+                "qty": float(s.filled_qty or 0),
+                "order_id": oid,
+                "reason": reason,
+                "filled_avg_price": float(getattr(s, "filled_avg_price", 0) or 0)
+            }
     s = get_order(alpaca, oid)
-    return {"status": s.status, "symbol": symbol, "side": side, "qty": float(s.filled_qty or 0), "order_id": oid, "reason": reason, "filled_avg_price": float(getattr(s, "filled_avg_price", 0) or 0)}
+    return {
+        "status": s.status,
+        "symbol": symbol,
+        "side": side,
+        "qty": float(s.filled_qty or 0),
+        "order_id": oid,
+        "reason": reason,
+        "filled_avg_price": float(getattr(s, "filled_avg_price", 0) or 0)
+    }
+
+
+def send_daily_report(alpaca, df, ai_thesis, trades_today, port_json, settings, state):
+    tz = settings.get("timezone", "Europe/Amsterdam")
+    today_local = datetime.now(ZoneInfo(tz)).date()
+    acct = get_account(alpaca)
+
+    if state.get("daily_baseline_date") != str(today_local):
+        state["daily_baseline_date"] = str(today_local)
+        state["daily_baseline_equity"] = float(acct.equity)
+        save_state(settings.get("state_file"), state)
+
+    equity_val = float(acct.equity)
+    cash_val = float(acct.cash)
+    baseline = float(state.get("daily_baseline_equity", equity_val))
+    daily_pnl = equity_val - baseline
+    as_of_iso, subject = _local_timestamp_and_subject(tz)
+
+    vote_summary = "Multi-model voting enabled" if settings.get("vote", {}).get("enabled", True) else ""
+    intraday_pl = _intraday_unrealized_pl(alpaca)
+    vote_summary = (vote_summary + f" • Intraday UPL: ${intraday_pl:,.2f}").strip(" •")
+    img_path = _save_equity_chart(settings["portfolio_csv"], settings["plot_dir"])
+    forecast = next_day_forecast(f"Holdings JSON: {port_json}\nThesis: {ai_thesis}")
+    total_pl = _total_unrealized_pl(alpaca)
+
+    html = build_report_html(
+        trades_today=trades_today,
+        positions_df=df,
+        thesis=ai_thesis,
+        forecast=forecast,
+        equity=equity_val,
+        cash=cash_val,
+        daily_pnl=daily_pnl,
+        as_of_iso=as_of_iso,
+        vote_summary=vote_summary,
+        inline_cid="chart",
+        total_pl=total_pl
+    )
+    send_email_html(subject, html, img_path)
+
+
+def _save_equity_chart(portfolio_csv: str, plot_dir: str) -> str:
+    from matplotlib.ticker import FuncFormatter
+    os.makedirs(plot_dir, exist_ok=True)
+    df = pd.read_csv(portfolio_csv)
+    df = df[df["Ticker"] == "TOTAL"].copy()
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df = df.sort_values("Date")
+        x = df["Date"]
+    else:
+        x = range(len(df))
+    p = os.path.join(plot_dir, f"equity_{datetime.now(timezone.utc).strftime('%Y%m%d')}.png")
+    plt.figure(figsize=(9, 4.2))
+    plt.plot(x, df["Total Equity"], marker="o")
+    plt.title("Portfolio Equity")
+    plt.xlabel("Date")
+    plt.ylabel("USD")
+    fmt = FuncFormatter(lambda y, _: f"${y:,.0f}")
+    ax = plt.gca()
+    ax.yaxis.set_major_formatter(fmt)
+    ax.grid(True, axis="y", alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(p, dpi=160)
+    plt.close()
+    return p
+
+
+def _local_timestamp_and_subject(tz_name: str = "Europe/Amsterdam"):
+    now_local = datetime.now(ZoneInfo(tz_name))
+    as_of_str = now_local.strftime("%A, %d %b %Y %H:%M %Z")
+    subject = f"Daily Trading Report - {now_local.strftime('%A')}"
+    return as_of_str, subject
+
+
+def _intraday_unrealized_pl(alpaca) -> float:
+    try:
+        total = 0.0
+        for p in alpaca.list_positions():
+            val = getattr(p, "unrealized_intraday_pl", None)
+            if val is not None:
+                total += float(val)
+        return total
+    except Exception:
+        return 0.0
+
+
+def _total_unrealized_pl(alpaca) -> float:
+    try:
+        s = 0.0
+        for p in alpaca.list_positions():
+            v = getattr(p, "unrealized_pl", None)
+            if v is not None:
+                s += float(v)
+        return s
+    except Exception:
+        return 0.0
 
 
 def main():
     init_db()
     load_dotenv()
-    settings = load_settings(os.path.join(os.path.dirname(__file__), "config", "settings.json"))
+    settings_path = os.path.join(os.path.dirname(__file__), "config", "settings.json")
+    settings = load_settings(settings_path)
     alpaca = make_alpaca()
 
     old_equity = load_latest_total_equity(settings["portfolio_csv"])
@@ -73,9 +196,30 @@ def main():
     last_thesis = load_thesis(thesis_path)
     port_json = summarize_portfolio_for_prompt(df)
 
-    uni_syms = auto_universe(alpaca, settings)
-    port_prompt = get_portfolio_prompt(port_json, cash_live, last_thesis, week=6) + f" Only choose from: {uni_syms[:50]}"
-    ai = ask_openai(port_prompt)
+    state_path = settings.get("state_file", os.path.join(os.path.dirname(__file__), "state.json"))
+    state = load_state(state_path)
+
+    try:
+        uni_syms = auto_universe(alpaca, settings)
+        if uni_syms:
+            state["last_universe"] = uni_syms
+            save_state(state_path, state)
+    except Exception:
+        uni_syms = state.get("last_universe", [])
+        if not uni_syms:
+            uni_syms = ["ABEO", "ADMA", "SLS", "TRVN", "CRMD", "CTXR"]
+
+    base_prompt = get_portfolio_prompt(port_json, cash_live, last_thesis, week=6) + f" Only choose from: {uni_syms[:50]}"
+    if settings.get("vote", {}).get("enabled", True):
+        voted_orders, voted_thesis = vote_orders(base_prompt, settings)
+        class _Tmp: pass
+        ai = _Tmp()
+        ai.orders = []
+        for o in voted_orders:
+            ai.orders.append(type("O", (object,), o))
+        ai.thesis = voted_thesis
+    else:
+        ai = ask_openai(base_prompt)
 
     acct = get_account(alpaca)
     equity_live = float(acct.equity)
@@ -88,14 +232,16 @@ def main():
             print("Baseline set. Daily Change will be meaningful from next run.")
         else:
             print(f"Daily Change: ${new_equity - old_equity:.2f}")
-        plot_weekly_performance(settings["portfolio_csv"], settings["plot_dir"], interactive=bool(settings["plot_interactive"]))
+
+        send_daily_report(alpaca, df, ai.thesis, [], port_json, settings, state)
+
+        plot_weekly_performance(settings["portfolio_csv"], settings["plot_dir"],
+                                interactive=bool(settings["plot_interactive"]))
         return
 
     healthy = market_is_healthy(alpaca)
 
     budget = settings.get("budget", {})
-    virtual_equity = float(budget.get("virtual_equity", equity_live))
-    max_daily_abs = float(budget.get("max_daily_allocation_abs", float("inf")))
     max_pos_abs = float(budget.get("max_pos_abs", float("inf")))
 
     buy_candidates = []
@@ -167,6 +313,7 @@ def main():
         flat = flatten_all(alpaca)
         print("Flattened due to daily drawdown:", flat)
         update_portfolio_totals(alpaca, settings["portfolio_csv"])
+        send_daily_report(alpaca, df, ai.thesis, [], port_json, settings, state)
         return
 
     clock = get_clock(alpaca)
@@ -174,28 +321,39 @@ def main():
         print("Market closed; skipping order placement.")
         validated_orders = []
 
+    trades_today = []
     for vo in validated_orders:
         client_id = make_client_order_id("chatgptbot", vo["ticker"])
         res = execute_trade(alpaca, vo, limit_price=vo["limit_price"], settings=settings, dry_run=bool(settings["dry_run"]), client_order_id=client_id)
-        insert_trade(vo["ticker"], vo["side"], int(vo["shares"]), float(vo["limit_price"]), res.get("status",""), int(res.get("qty",0)), float(res.get("filled_avg_price", vo["limit_price"])))
-        log = {
+        trades_today.append({
             "Timestamp": iso_now_utc(),
             "Date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "Ticker": vo["ticker"],
             "Shares": vo["shares"],
             "Side": vo["side"],
-            "Reason": vo.get("reason", ""),
             "OrderStatus": res.get("status", ""),
-            "OrderId": res.get("order_id", ""),
-            "ClientOrderId": client_id,
-            "BudgetVirtualEquity": float(virtual_equity)
-        }
-        save_trade_log(settings["trade_log_csv"], log)
+            "OrderId": res.get("order_id", "")
+        })
+        insert_trade(vo["ticker"], vo["side"], int(vo["shares"]), float(vo["limit_price"]), res.get("status", ""), int(res.get("qty", 0)), float(res.get("filled_avg_price", vo["limit_price"])))
+        save_trade_log(settings["trade_log_csv"], trades_today[-1])
 
     save_thesis(thesis_path, ai.thesis or "No thesis returned.")
     update_portfolio_totals(alpaca, settings["portfolio_csv"])
 
     new_equity = load_latest_total_equity(settings["portfolio_csv"])
+
+    state_path = settings.get("state_file", os.path.join(os.path.dirname(__file__), "state.json"))
+    state = load_state(state_path)
+    base_eq = float(state.get("base_equity", new_equity))
+    new_virtual, changed = rebalance(float(settings["budget"]["virtual_equity"]), base_eq, new_equity, settings)
+    if changed:
+        save_virtual_equity(settings_path, settings, new_virtual)
+
+    send_daily_report(alpaca, df, ai.thesis, [], port_json, settings, state)
+
+    state["base_equity"] = new_equity
+    save_state(state_path, state)
+
     if old_equity == 0:
         print("Baseline set. Daily Change will be meaningful from next run.")
     else:
