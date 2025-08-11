@@ -1,15 +1,22 @@
 {
   "mode": "paper",
-  "dry_run": true,
+  "dry_run": false,
   "plot_interactive": false,
   "timezone": "Europe/Amsterdam",
+  "trade_timing": {
+    "place_when_market_closed": true
+  },
   "risk": {
     "max_pos_pct": 1.0,
     "max_daily_allocation_pct": 1.0,
-    "max_symbols": 3,
+    "max_symbols": 5,
     "min_price": 1.0,
     "min_avg_volume": 100000,
     "max_market_cap": 300000000
+  },
+  "spread": {
+    "enabled": true,
+    "target_positions": 4
   },
   "budget": {
     "virtual_equity": 1000,
@@ -54,6 +61,12 @@
     "min_virtual": 250,
     "max_virtual": 5000,
     "round_to": 50
+  },
+  "site": {
+    "enabled": true,
+    "public_dir": "/var/www/vhosts/mauriceb.nl/trading.mauriceb.nl",
+    "base_url": "https://trading.mauriceb.nl",
+    "write_index": false
   },
   "plot_dir": "plots",
   "data_dir": "Scripts and CSV Files",
