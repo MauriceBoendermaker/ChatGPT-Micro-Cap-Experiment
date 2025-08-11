@@ -1,7 +1,6 @@
 import os
 import time
-import pandas as pd
-import matplotlib.pyplot as plt
+import random
 
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -26,6 +25,9 @@ from .budget_rebalancer import rebalance, save_virtual_equity
 from .state import load_state, save_state
 from .market_forecast import next_day_forecast
 from .reporter import build_report_html, send_email_html
+from .report_utils import save_equity_chart, save_pnl_chart, write_csv_snapshots, compute_risk_alerts, load_inception_equity
+from .site_publisher import publish_dashboard
+
 
 
 def update_portfolio_totals(alpaca, portfolio_csv: str) -> None:
@@ -84,72 +86,6 @@ def execute_trade(alpaca, order: dict, limit_price: float, settings: dict, dry_r
     }
 
 
-def send_daily_report(alpaca, df, ai_thesis, trades_today, port_json, settings, state):
-    tz = settings.get("timezone", "Europe/Amsterdam")
-    today_local = datetime.now(ZoneInfo(tz)).date()
-    acct = get_account(alpaca)
-
-    if state.get("daily_baseline_date") != str(today_local):
-        state["daily_baseline_date"] = str(today_local)
-        state["daily_baseline_equity"] = float(acct.equity)
-        save_state(settings.get("state_file"), state)
-
-    equity_val = float(acct.equity)
-    cash_val = float(acct.cash)
-    baseline = float(state.get("daily_baseline_equity", equity_val))
-    daily_pnl = equity_val - baseline
-    as_of_iso, subject = _local_timestamp_and_subject(tz)
-
-    vote_summary = "Multi-model voting enabled" if settings.get("vote", {}).get("enabled", True) else ""
-    intraday_pl = _intraday_unrealized_pl(alpaca)
-    vote_summary = (vote_summary + f" • Intraday UPL: ${intraday_pl:,.2f}").strip(" •")
-    img_path = _save_equity_chart(settings["portfolio_csv"], settings["plot_dir"])
-    forecast = next_day_forecast(f"Holdings JSON: {port_json}\nThesis: {ai_thesis}")
-    total_pl = _total_unrealized_pl(alpaca)
-
-    html = build_report_html(
-        trades_today=trades_today,
-        positions_df=df,
-        thesis=ai_thesis,
-        forecast=forecast,
-        equity=equity_val,
-        cash=cash_val,
-        daily_pnl=daily_pnl,
-        as_of_iso=as_of_iso,
-        vote_summary=vote_summary,
-        inline_cid="chart",
-        total_pl=total_pl
-    )
-    send_email_html(subject, html, img_path)
-
-
-def _save_equity_chart(portfolio_csv: str, plot_dir: str) -> str:
-    from matplotlib.ticker import FuncFormatter
-    os.makedirs(plot_dir, exist_ok=True)
-    df = pd.read_csv(portfolio_csv)
-    df = df[df["Ticker"] == "TOTAL"].copy()
-    if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-        df = df.sort_values("Date")
-        x = df["Date"]
-    else:
-        x = range(len(df))
-    p = os.path.join(plot_dir, f"equity_{datetime.now(timezone.utc).strftime('%Y%m%d')}.png")
-    plt.figure(figsize=(9, 4.2))
-    plt.plot(x, df["Total Equity"], marker="o")
-    plt.title("Portfolio Equity")
-    plt.xlabel("Date")
-    plt.ylabel("USD")
-    fmt = FuncFormatter(lambda y, _: f"${y:,.0f}")
-    ax = plt.gca()
-    ax.yaxis.set_major_formatter(fmt)
-    ax.grid(True, axis="y", alpha=0.25)
-    plt.tight_layout()
-    plt.savefig(p, dpi=160)
-    plt.close()
-    return p
-
-
 def _local_timestamp_and_subject(tz_name: str = "Europe/Amsterdam"):
     now_local = datetime.now(ZoneInfo(tz_name))
     as_of_str = now_local.strftime("%A, %d %b %Y %H:%M %Z")
@@ -181,7 +117,137 @@ def _total_unrealized_pl(alpaca) -> float:
         return 0.0
 
 
+def _top_and_worst_today(alpaca):
+    try:
+        items = []
+        for p in alpaca.list_positions():
+            sym = getattr(p, "symbol", "")
+            pc = getattr(p, "unrealized_intraday_plpc", None)
+            try:
+                pct = float(pc) if pc is not None else 0.0
+            except Exception:
+                pct = 0.0
+            items.append((sym, pct))
+        if not items:
+            return None, None
+        top = max(items, key=lambda x: x[1])
+        worst = min(items, key=lambda x: x[1])
+        return top, worst
+    except Exception:
+        return None, None
+
+
+def _fill_spread_candidates(alpaca, uni_syms, df, existing, target_count, settings):
+    have = {c["ticker"] for c in existing}
+    held = set(df["Ticker"].astype(str).tolist()) if df is not None and not df.empty else set()
+    pool = [s for s in uni_syms if s not in have and s not in held]
+    random.shuffle(pool)
+    out = list(existing)
+    for sym in pool:
+        if len(out) >= target_count:
+            break
+        try:
+            meta = enrich_symbol(alpaca, sym)
+            if not validate_symbol(meta, settings):
+                continue
+            price = float(meta["price"])
+            if price <= 0:
+                continue
+            out.append({"ticker": sym, "price": price, "reason": "SPREAD_FILL"})
+        except Exception:
+            continue
+    return out
+
+
+def send_daily_report(alpaca, df, ai_thesis, trades_today, port_json, settings, state, state_path):
+    acct = get_account(alpaca)
+    tz = settings.get("timezone", "Europe/Amsterdam")
+    from zoneinfo import ZoneInfo
+    today_local = datetime.now(ZoneInfo(tz)).date()
+    if state.get("daily_baseline_date") != str(today_local):
+        state["daily_baseline_date"] = str(today_local)
+        state["daily_baseline_equity"] = float(acct.equity)
+        save_state(state_path, state)
+    equity_val = float(acct.equity)
+    cash_val = float(acct.cash)
+    baseline = float(state.get("daily_baseline_equity", equity_val))
+    daily_pnl = equity_val - baseline
+    as_of_iso, subject = _local_timestamp_and_subject(tz)
+    eq_path = save_equity_chart(settings["portfolio_csv"], settings["plot_dir"])
+    pnl_path = save_pnl_chart(settings["portfolio_csv"], settings["plot_dir"])
+    tickers = df["Ticker"].astype(str).tolist() if df is not None and not df.empty else []
+    sectors = {}
+    for sym in tickers:
+        try:
+            meta = enrich_symbol(alpaca, sym)
+            sectors[sym] = meta.get("sector", "Unknown")
+        except Exception:
+            sectors[sym] = "Unknown"
+    alerts = compute_risk_alerts(df, equity_val, settings, sectors)
+    attachments = write_csv_snapshots(df, trades_today, settings.get("report_dir", settings["plot_dir"]))
+    vote_summary = "Multi-model voting enabled" if settings.get("vote", {}).get("enabled", True) else ""
+    intraday_pl = _intraday_unrealized_pl(alpaca)
+    vote_summary = (vote_summary + f" • Intraday UPL: ${intraday_pl:,.2f}").strip(" •")
+    inception_eq = load_inception_equity(settings["portfolio_csv"])
+    total_pl = float(equity_val) - float(inception_eq)
+    top, worst = _top_and_worst_today(alpaca)
+
+    inline_images = {}
+    inline_cid = None
+    pnl_cid = None
+
+    if eq_path and os.path.exists(eq_path):
+        inline_images["chart"] = eq_path
+        inline_cid = "chart"
+
+    if pnl_path and os.path.exists(pnl_path):
+        inline_images["pnl"] = pnl_path
+        pnl_cid = "pnl"
+
+    html = build_report_html(
+        trades_today=trades_today,
+        positions_df=df,
+        thesis=ai_thesis,
+        forecast=next_day_forecast(f"Holdings JSON: {port_json}\nThesis: {ai_thesis}"),
+        equity=equity_val,
+        cash=cash_val,
+        daily_pnl=daily_pnl,
+        as_of_iso=as_of_iso,
+        vote_summary=vote_summary,
+        inline_cid=inline_cid,
+        pnl_cid=pnl_cid,
+        total_pl=total_pl,
+        risk_alerts=alerts,
+        news_by_ticker=None,
+        top_performer=top,
+        worst_performer=worst
+    )
+
+    try:
+        publish_dashboard(
+            html,
+            inline_images,
+            attachments,
+            settings,
+            equity_val,
+            cash_val,
+            daily_pnl,
+            total_pl,
+            as_of_iso
+        )
+    except Exception as e:
+        print("Dashboard publish failed:", repr(e))
+
+    send_email_html(subject, html, inline_images, attachments)
+
+
 def main():
+    cutoff = os.getenv("RUN_UNTIL")  # e.g., 2025-09-01
+    if cutoff:
+        today = datetime.utcnow().date()
+        if today > datetime.strptime(cutoff, "%Y-%m-%d").date():
+            return
+
     init_db()
     load_dotenv()
     settings_path = os.path.join(os.path.dirname(__file__), "config", "settings.json")
@@ -232,11 +298,8 @@ def main():
             print("Baseline set. Daily Change will be meaningful from next run.")
         else:
             print(f"Daily Change: ${new_equity - old_equity:.2f}")
-
-        send_daily_report(alpaca, df, ai.thesis, [], port_json, settings, state)
-
-        plot_weekly_performance(settings["portfolio_csv"], settings["plot_dir"],
-                                interactive=bool(settings["plot_interactive"]))
+        send_daily_report(alpaca, df, ai.thesis, [], port_json, settings, state, state_path)
+        plot_weekly_performance(settings["portfolio_csv"], settings["plot_dir"], interactive=bool(settings["plot_interactive"]))
         return
 
     healthy = market_is_healthy(alpaca)
@@ -263,12 +326,18 @@ def main():
         if healthy:
             buy_candidates.append({"ticker": o.ticker, "price": price, "reason": o.reason})
 
-    buy_candidates = buy_candidates[:settings["risk"]["max_symbols"]]
+    target_positions = int(settings.get("spread", {}).get("target_positions", 4))
+    if healthy and settings.get("spread", {}).get("enabled", True):
+        buy_candidates = _fill_spread_candidates(alpaca, uni_syms, df, buy_candidates, target_positions, settings)
+
+    buy_candidates = buy_candidates[:max(int(settings.get("risk", {}).get("max_symbols", target_positions)), target_positions)]
+
     remaining = float(settings["budget"]["max_daily_allocation_abs"])
-    per_name = remaining / max(1, len(buy_candidates)) if buy_candidates else 0.0
+    intended_n = max(1, min(len(buy_candidates), target_positions))
+    per_name = remaining / intended_n if buy_candidates else 0.0
 
     validated_orders = []
-    for c in buy_candidates:
+    for c in buy_candidates[:intended_n]:
         price = c["price"]
         existing_value = 0.0
         if not df.empty and c["ticker"] in df["Ticker"].values:
@@ -313,13 +382,20 @@ def main():
         flat = flatten_all(alpaca)
         print("Flattened due to daily drawdown:", flat)
         update_portfolio_totals(alpaca, settings["portfolio_csv"])
-        send_daily_report(alpaca, df, ai.thesis, [], port_json, settings, state)
+        send_daily_report(alpaca, df, ai.thesis, [], port_json, settings, state, state_path)
         return
 
     clock = get_clock(alpaca)
-    if not clock.is_open:
-        print("Market closed; skipping order placement.")
-        validated_orders = []
+    place_when_closed = bool(settings.get("trade_timing", {}).get("place_when_market_closed", True))
+
+    if clock.is_open:
+        pass
+    else:
+        if place_when_closed:
+            print("Market closed; will queue DAY orders for next session.")
+        else:
+            print("Market closed and placing-when-closed disabled; skipping order placement.")
+            validated_orders = []
 
     trades_today = []
     for vo in validated_orders:
@@ -349,7 +425,7 @@ def main():
     if changed:
         save_virtual_equity(settings_path, settings, new_virtual)
 
-    send_daily_report(alpaca, df, ai.thesis, [], port_json, settings, state)
+    send_daily_report(alpaca, df, ai.thesis, trades_today, port_json, settings, state, state_path)
 
     state["base_equity"] = new_equity
     save_state(state_path, state)
@@ -364,3 +440,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    print("Summary email sent.")
