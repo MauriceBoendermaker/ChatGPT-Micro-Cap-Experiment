@@ -1,0 +1,30 @@
+{
+  "last_universe": [
+    "BITF",
+    "CONI",
+    "BLND",
+    "ECC",
+    "ATAI",
+    "DYNX",
+    "BRLT",
+    "ASST",
+    "BRR",
+    "AEHR",
+    "CORZW",
+    "EARN",
+    "ECAT",
+    "DYNXW",
+    "AEHL",
+    "CGNT",
+    "FGI",
+    "ADUR",
+    "BRW",
+    "ASTI",
+    "COLA",
+    "AEMD",
+    "BSCV"
+  ],
+  "base_equity": 100012.79,
+  "daily_baseline_date": "2025-08-09",
+  "daily_baseline_equity": 100012.79
+}
