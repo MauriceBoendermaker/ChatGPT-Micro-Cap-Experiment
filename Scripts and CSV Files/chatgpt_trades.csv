@@ -1,0 +1,12 @@
+Date,Ticker,Shares,Side,Reason,Timestamp,OrderStatus,OrderId,ClientOrderId,BudgetVirtualEquity
+2025-08-07,ABEO,4,sell,Realize gains as price target has been met and limited upside potential,,,,,
+2025-08-07,ABEO,4,sell,Price has appreciated significantly; reallocate gains,,,,,
+2025-08-07,IINN,16,sell,Underperformance and breach of stop loss; cut losses,,,,,
+2025-08-07,IINN,16,sell,Stock is below stop loss and current performance is weak,,,,,
+2025-08-07,ABEO,5,buy,Strong momentum and potential for further upside,,,,,
+2025-08-07,ACTU,10000,buy,Solid fundamentals and expected growth trajectory,,,,,
+2025-08-07,ABEO,5,buy,Strong growth prospects in biotech and continued upward momentum,,,,,
+2025-08-08,ABEO,32,buy,Strong performance and strategic positioning in micro-cap space.,2025-08-08T15:23:48.758756+00:00,filled,f30916ac-049b-4841-bd3f-7ced08446418,chatgptbot_ABEO_12ce242a,1000.0
+2025-08-08,ABEO,161,buy,ABEO has shown strong performance and aligns with the strategy of investing in high-potential micro-cap stocks.,2025-08-08T15:31:37.462732+00:00,dry_run,,chatgptbot_ABEO_d39b9b9b,1000.0
+2025-08-08,ABEO,160,buy,Strong performance and strategic positioning,2025-08-08T15:39:36.951948+00:00,dry_run,,chatgptbot_ABEO_af46a277,1000.0
+2025-08-08,ABEO,160,buy,"ABEO continues to show strong performance and strategic positioning, aligning with the investment thesis.",2025-08-08T15:41:32.757767+00:00,filled,6d2d20de-1d08-4fd7-9ff9-c8ee3e91851f,chatgptbot_ABEO_7b046a78,1000.0
